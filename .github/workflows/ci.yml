@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: peblo
+          POSTGRES_PASSWORD: peblo
+          POSTGRES_DB: peblo_tv
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U peblo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg2://peblo:peblo@localhost:5432/peblo_tv
+      STORAGE_BACKEND: local
+      STORAGE_LOCAL_ROOT: ./storage_data
+      STORAGE_PUBLIC_BASE_URL: http://localhost:8000/media
+      EDITOR_API_KEY: editor-dev-key
+      ADMIN_API_KEY: admin-dev-key
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Backend: migrate, seed, unit/integration tests ---
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Run migrations
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Create test database
+        run: |
+          PGPASSWORD=peblo psql -h localhost -U peblo -d postgres -c "CREATE DATABASE peblo_tv_test;"
+
+      - name: Run backend tests
+        working-directory: backend
+        run: pytest -v
+
+      - name: Seed database (for CMS/viewer integration tests below)
+        working-directory: backend
+        run: python -m app.seed
+
+      - name: Resolve known seed-data issues so we can demonstrate a full publish
+        working-directory: backend
+        run: python -m scripts.ci_resolve_seed_issues
+
+      - name: Start backend API in background
+        working-directory: backend
+        run: |
+          nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/backend.log 2>&1 &
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8000/health && break
+            echo "Waiting for backend... ($i)"; sleep 1
+          done
+
+      - name: Publish catalogue (so CMS/viewer tests have real content)
+        run: curl -sf -X POST -H "Authorization: Bearer admin-dev-key" http://localhost:8000/admin/catalog/publish
+
+      # --- CMS: lint, typecheck+build, tests ---
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install CMS dependencies
+        working-directory: cms
+        run: npm ci
+
+      - name: Lint CMS
+        working-directory: cms
+        run: npm run lint
+
+      - name: Build CMS (typecheck)
+        working-directory: cms
+        env:
+          VITE_API_BASE_URL: http://localhost:8000
+        run: npm run build
+
+      - name: Run CMS tests
+        working-directory: cms
+        env:
+          VITE_API_BASE_URL: http://localhost:8000
+        run: npm test
+
+      # --- Viewer: lint, typecheck+build, tests ---
+      - name: Install viewer dependencies
+        working-directory: viewer
+        run: npm ci
+
+      - name: Lint viewer
+        working-directory: viewer
+        run: npm run lint
+
+      - name: Build viewer (typecheck)
+        working-directory: viewer
+        env:
+          VITE_API_BASE_URL: http://localhost:8000
+        run: npm run build
+
+      - name: Run viewer tests
+        working-directory: viewer
+        env:
+          VITE_API_BASE_URL: http://localhost:8000
+        run: npm test
+
+      - name: Dump backend log on failure
+        if: failure()
+        run: cat /tmp/backend.log || true
+
+  build-images:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t peblo-backend:${{ github.sha }} ./backend
+
+      - name: Build CMS image
+        run: docker build -t peblo-cms:${{ github.sha }} ./cms
+
+      - name: Build viewer image
+        run: docker build -t peblo-viewer:${{ github.sha }} ./viewer
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-images
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy (placeholder)
+        run: |
+          echo "This step is intentionally not wired to a real target -- see README Part D."
+          echo "In a real deployment this would, at minimum:"
+          echo "  1. Tag and push the three images built above to a registry (ECR/GCR/etc)"
+          echo "  2. Run 'alembic upgrade head' against the production DB as a separate"
+          echo "     release step, BEFORE swapping traffic to the new backend image"
+          echo "     (never as a container-startup side effect in production, unlike"
+          echo "     the dev-friendly docker-entrypoint.sh used locally)"
+          echo "  3. Roll the backend service (e.g. ECS/Cloud Run/k8s) to the new image"
+          echo "     with a health-check gate on GET /health before draining old tasks"
+          echo "  4. Point CMS/viewer static hosting (S3+CloudFront, Vercel, etc) at the"
+          echo "     newly built assets; these have no server-side state so this is a"
+          echo "     plain cache-busted swap, safe to do in any order relative to step 3"
+          echo "  5. Secrets (DB credentials, API keys) would come from the cloud"
+          echo "     provider's secret manager injected as env vars at deploy time --"
+          echo "     never committed, never baked into the image -- see README for detail."

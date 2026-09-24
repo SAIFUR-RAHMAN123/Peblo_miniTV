@@ -1,0 +1,6 @@
+venv
+__pycache__
+*.pyc
+.env
+storage_data
+storage_data_test
