@@ -61,6 +61,13 @@ npm install
 npm run dev   # http://localhost:5174
 ```
 
+To get a fully populated Viewer on a fresh manual setup, also run:
+```bash
+cd backend
+python -m scripts.ci_resolve_seed_issues
+curl -X POST -H "Authorization: Bearer admin-dev-key" http://localhost:8000/admin/catalog/publish
+```
+
 Run backend tests: `cd backend && pytest -v` (needs a `peblo_tv_test`
 database — see `backend/tests/conftest.py`). Run frontend tests:
 `npm test` in `cms/` or `viewer/` (needs the backend running, since these
@@ -76,6 +83,14 @@ The validation report surfaces these automatically, but for reference:
 | Published episode with zero artwork | `ep_0036` |
 | Published Season-0 trailers missing poster+banner | `ep_0093`, `ep_0094` |
 | Show with no `section` set | `Rhyme Rangers` (all-draft, so not yet blocking) |
+
+`backend/scripts/ci_resolve_seed_issues.py` resolves the first three the
+way an editor actually would (uploads the missing artwork, unpublishes the
+one member of the duplicate pair that can't be auto-resolved) rather than
+hiding them — it's used by CI and available for local/manual setup too.
+The `Rhyme Rangers` item is informational only: it won't block publish
+until an episode under it is marked published, so it's left as-is to keep
+that scenario demonstrable in the validation report.
 
 ## Roles
 
@@ -104,6 +119,11 @@ enforcement, not a UI toggle:
   `catalog_builder.py`).
 - **Trailers (season 0)** are separated into their own `trailers` list at
   build time, never mixed into `seasons`.
+- **Viewer visual design** deliberately leans into a familiar
+  streaming-app aesthetic (dark theme, hero banner with dimmed/blurred
+  background for text contrast, horizontal poster rows, a fixed circular
+  back button on show detail) — built from scratch with Peblo's own
+  content and no third-party assets, branding, or copy.
 
 ---
 
@@ -229,10 +249,3 @@ and self-correcting once someone reads the report.
 move to a cloud secret manager (AWS Secrets Manager / GCP Secret Manager)
 injected as environment variables at deploy time, never committed —
 `.env.example` documents every variable needed but ships no real secret.
-
-**Time spent (approximate):**
-- Part A (Backend): ~3.5h
-- Part B (CMS): ~1.5h
-- Part C (Viewer): ~1h
-- Part D (Pipeline): ~1h
-- Part E (Written) + README: ~0.5h
